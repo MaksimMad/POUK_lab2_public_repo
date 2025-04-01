@@ -3,136 +3,116 @@
 #include "nav_msgs/msg/odometry.hpp"
 #include "geometry_msgs/msg/twist.hpp"
 
-using std::placeholders::_1;
+const static double rng = 1;
 
 class RobotControl : public rclcpp::Node
 {
 public:
-RobotControl() : Node("control_node")
-  {
-    // Инициализация подписчиков и издателя
-    laser_sub_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
-      "base_scan", 10, std::bind(&RobotControl::laserCallback, this, _1));
-    
-    pose_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-      "base_pose_ground_truth", 10, std::bind(&RobotControl::poseCallback, this, _1));
-    
-    pub_ = this->create_publisher<geometry_msgs::msg::Twist>("cmd_vel", 10);
-    
-    // Таймер с частотой 10 Гц (каждые 0.1 секунды)
-    timer_ = this->create_wall_timer(
-      std::chrono::milliseconds(100), std::bind(&RobotControl::timerCallback, this));
-    
-    // Оптимальные коэффициенты PID после подбора
-    // kp_ = 1.2;  // пропорциональный коэффициент
-    // ki_ = 0.05; // интегральный коэффициент
-    // kd_ = 0.2;  // дифференциальный коэффициент
 
-    kp_ = 40;  // пропорциональный коэффициент
-    ki_ = 0.05; // интегральный коэффициент
-    kd_ = 0.2; 
-    
-    RCLCPP_INFO(this->get_logger(), "Control node has been started");
-  }
+bool obstacle = false;
+double err = 0;
+double int_err = 0;
+double old_err = 0;
+RobotControl() : Node("robot_control")
+    {
+        // Инициализация Subscription, Publisher и Timer
+        laserSub_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
+            "base_scan", 10,
+            std::bind(&RobotControl::laser_callback, this, std::placeholders::_1));
+        poseSub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+            "base_pose_ground_truth", 10,
+            std::bind(&RobotControl::pose_callback, this, std::placeholders::_1));
+        cmdPub_ = this->create_publisher<geometry_msgs::msg::Twist>("cmd_vel", 10);
+        timer_ = this->create_wall_timer(std::chrono::milliseconds(100),
+            std::bind(&RobotControl::timer_callback, this));
+    }
 
 private:
-  // Флаги и переменные состояния
-  bool obstacle_ = false;
-  double err_ = 0;
-  double int_err_ = 0;
-  double old_err_ = 0;
-  const double range_ = 1.0;  // желаемое расстояние до стенки
-  
-  // Коэффициенты PID
-  double kp_;
-  double ki_;
-  double kd_;
-  
-  // Подписчики, издатель и таймер
-  rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr laser_sub_;
-  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr pose_sub_;
-  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr pub_;
-  rclcpp::TimerBase::SharedPtr timer_;
-
-  /**
-   * Обработчик данных лазерного дальномера
-   */
-  void laserCallback(const sensor_msgs::msg::LaserScan::SharedPtr msg)
-  {
-    RCLCPP_DEBUG(this->get_logger(), "Laser msg: %f", msg->scan_time);
-    const double kMinRange = 0.9;
-    obstacle_ = false;
-    double curr_range = msg->ranges[0];
-    
-    for (size_t i = 0; i < msg->ranges.size(); i++)
+    /**
+    * Функция, которая будет вызвана
+    * при получении данных от лазерного дальномера
+    * параметр функции msg - ссылка на полученное сообщение
+    */
+    void laser_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg)
     {
-      if (msg->ranges[i] < curr_range)
-      {
-        curr_range = msg->ranges[i];
-      }
-      // Проверяем, нет ли вблизи робота препятствия
-      if (msg->ranges[i] < kMinRange)
-      {
-        obstacle_ = true;
-        RCLCPP_WARN(this->get_logger(), "OBSTACLE!!!");
-        break;
-      }
+        RCLCPP_DEBUG_STREAM(this->get_logger(), "Laser msg: " << msg->scan_time);
+
+        const double kMinRange = 0.9;
+        obstacle = false;
+        double curr_range = msg->ranges[0];
+        for (size_t i = 0; i<msg->ranges.size(); i++)
+        {
+            if (msg->ranges[i] < curr_range)
+            {
+                curr_range = msg->ranges[i];
+            }
+            //проверим нет ли вблизи робота препятствия
+            if (msg->ranges[i] < kMinRange)
+	        {
+		        obstacle = true;
+                RCLCPP_WARN_STREAM(this->get_logger(), "OBSTACLE!!!");
+		        break;
+	        }
+        }
+        err = rng - curr_range; //ошибка
     }
-    err_ = range_ - curr_range; // ошибка регулирования
-  }
-
-  /**
-   * Обработчик данных о положении робота
-   */
-  void poseCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
-  {
-    double theta = 2 * atan2(msg->pose.pose.orientation.z, 
-                            msg->pose.pose.orientation.w);
-    RCLCPP_DEBUG(this->get_logger(), "Pose msg: x = %f, y = %f, theta = %f",
-                 msg->pose.pose.position.x,
-                 msg->pose.pose.position.y,
-                 theta);
-  }
-
-  /**
-   * Обработчик таймера (вызывается каждые 0.1 секунды)
-   */
-  void timerCallback()
-  {
-    static int counter = 0;
-    counter++;
-    RCLCPP_DEBUG(this->get_logger(), "on timer %d", counter);
-    
-    auto cmd = geometry_msgs::msg::Twist();
-    
-    if (!obstacle_)
-    {
-      int_err_ += err_; // интегральная составляющая
-      double dif_err = err_ - old_err_; // дифференциальная составляющая
-      old_err_ = err_;
-      
-      RCLCPP_INFO(this->get_logger(), "Go forward");
-      cmd.linear.x = 0.5;
-      
-      // ПИД-регулирование с подобранными коэффициентами
-      cmd.angular.z = kp_ * err_ + ki_ * int_err_ + kd_ * dif_err;
     }
-    else
+
+    /**
+    * Функция, которая будет вызвана при
+    * получении сообщения с текущем положением робота
+    * параметр функции msg - ссылка на полученное сообщение
+    */
+    void pose_callback(const nav_msgs::msg::Odometry::SharedPtr msg)
     {
-      RCLCPP_WARN(this->get_logger(), "Spin around!");
-      cmd.linear.x = 0;
-      cmd.angular.z = 0.5;
+        RCLCPP_DEBUG_STREAM(this->get_logger(), "Pose msg: x = " << msg->pose.pose.position.x<<
+            " y = " << msg->pose.pose.position.y <<
+            " theta = " << 2*atan2(msg->pose.pose.orientation.z,
+                    msg->pose.pose.orientation.w));
     }
     
-    pub_->publish(cmd);
-  }
+    /*
+    * функция обработчик таймера
+    * параметр функции - структура, описывающая событие таймера, здесь не используется
+    */
+    void timer_callback()
+    {  
+	    static int counter = 0;
+	    counter++;
+        RCLCPP_DEBUG_STREAM(this->get_logger(), "on timer "<<counter);
+        //сообщение с помощью которого задается
+	    //управление угловой и линейной скоростью
+	    auto cmd = geometry_msgs::msg::Twist();
+        //если вблизи нет препятствия то задаем команды
+        if (!obstacle)
+	    {
+            int_err += err; //интегральная ошибка
+            double dif_err = err - old_err; //дифференциальная ошибкаold_err = err;
+            old_err = err;
+            RCLCPP_INFO_STREAM(this->get_logger(), "go forward");
+            cmd.linear.x = 0.5;
+            cmd.angular.z = err + 0.1*int_err + 0.01*dif_err; //ПИД-регулирование
+	    }
+        else
+        {
+            RCLCPP_WARN_STREAM(this->get_logger(), "Spin around!");
+            cmd.linear.x = 0;
+            cmd.angular.z = 0.5;
+        }
+        //отправляем (публикуем) команду
+	    cmdPub_->publish(cmd);
+    }
+
+    // Subscription, Publisher и Timer
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr poseSub_;
+    rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr laserSub_;
+    rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmdPub_;
+    rclcpp::TimerBase::SharedPtr timer_;
 };
 
-int main(int argc, char **argv)
-{
-  rclcpp::init(argc, argv);
-  auto node = std::make_shared<RobotControl>();
-  rclcpp::spin(node);
-  rclcpp::shutdown();
-  return 0;
+int main(int argc, char **argv){
+    rclcpp::init(argc, argv);
+    rclcpp::spin(std::make_shared<RobotControl>());
+    rclcpp::shutdown();
+    return 0;
 }
