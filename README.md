@@ -34,6 +34,8 @@
 ## Сборка и запуск проекта на ROS2
 из корневой папки (POUK_lab2_public_repo):
 
+```source /opt/ros/foxy/setup.bash```
+
 ```colcon build```
 
 ```source install/setup.bash```

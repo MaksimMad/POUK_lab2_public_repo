@@ -91,7 +91,7 @@ private:
             old_err = err;
             RCLCPP_INFO_STREAM(this->get_logger(), "go forward");
             cmd.linear.x = 0.5;
-            cmd.angular.z = 0.005*err + 0.0003*int_err + 13*dif_err; //ПИД-регулирование
+            cmd.angular.z = 13*err + 0.3*int_err + 6.5*dif_err; //ПИД-регулирование
 	    }
         else
         {
